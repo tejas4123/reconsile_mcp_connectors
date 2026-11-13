@@ -27,6 +27,11 @@ import type {
   StartRunRequest,
   StatsView,
   TypeVersionView,
+  McpConnectionView,
+  McpToolCallResultView,
+  McpResourceReadResultView,
+  McpPromptGetResultView,
+  McpExecutionRecordView,
 } from './api-types.ts'
 import { ApiError, NetworkError, parseHttpError } from './api-errors.ts'
 import { authClient } from '../auth/auth-client.ts'
@@ -112,6 +117,10 @@ export class ReconcileApiClient {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-Correlation-ID': correlationId,
+    }
+
+    if (this.tenant) {
+      headers['X-Tenant-ID'] = this.tenant
     }
 
     const activeToken = this.getToken()
@@ -531,6 +540,101 @@ export class ReconcileApiClient {
   async getMcpCapabilities(): Promise<unknown> {
     const res = await this.request<{ success: boolean; data: unknown }>('/api/mcp/capabilities')
     return res.data
+  }
+
+  // --- Real MCP Client Connection Methods (/api/v1/mcp/*) ---
+
+  async createMcpConnection(req: {
+    url: string
+    name?: string
+    bearer_token?: string
+    headers?: Record<string, string>
+    connect_now?: boolean
+  }): Promise<McpConnectionView> {
+    return this.request<McpConnectionView>('/api/v1/mcp/connections', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    })
+  }
+
+  async listMcpConnections(): Promise<McpConnectionView[]> {
+    return this.request<McpConnectionView[]>('/api/v1/mcp/connections')
+  }
+
+  async getMcpConnection(connectionId: string): Promise<McpConnectionView> {
+    return this.request<McpConnectionView>(`/api/v1/mcp/connections/${connectionId}`)
+  }
+
+  async connectMcpConnection(connectionId: string): Promise<McpConnectionView> {
+    return this.request<McpConnectionView>(`/api/v1/mcp/connections/${connectionId}/connect`, {
+      method: 'POST',
+    })
+  }
+
+  async disconnectMcpConnection(connectionId: string): Promise<McpConnectionView> {
+    return this.request<McpConnectionView>(`/api/v1/mcp/connections/${connectionId}/disconnect`, {
+      method: 'POST',
+    })
+  }
+
+  async refreshMcpConnection(connectionId: string): Promise<McpConnectionView> {
+    return this.request<McpConnectionView>(`/api/v1/mcp/connections/${connectionId}/refresh`, {
+      method: 'POST',
+    })
+  }
+
+  async listMcpTools(connectionId: string): Promise<Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>> {
+    return this.request<Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>>(
+      `/api/v1/mcp/connections/${connectionId}/tools`
+    )
+  }
+
+  async listMcpResources(connectionId: string): Promise<Array<{ uri: string; name?: string; description?: string; mimeType?: string }>> {
+    return this.request<Array<{ uri: string; name?: string; description?: string; mimeType?: string }>>(
+      `/api/v1/mcp/connections/${connectionId}/resources`
+    )
+  }
+
+  async listMcpPrompts(connectionId: string): Promise<Array<{ name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> }>> {
+    return this.request<Array<{ name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> }>>(
+      `/api/v1/mcp/connections/${connectionId}/prompts`
+    )
+  }
+
+  async callMcpTool(
+    connectionId: string,
+    toolName: string,
+    args: Record<string, unknown>
+  ): Promise<McpToolCallResultView> {
+    return this.request<McpToolCallResultView>(
+      `/api/v1/mcp/connections/${connectionId}/tools/${encodeURIComponent(toolName)}/call`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ arguments: args }),
+      }
+    )
+  }
+
+  async readMcpResource(connectionId: string, uri: string): Promise<McpResourceReadResultView> {
+    return this.request<McpResourceReadResultView>(`/api/v1/mcp/connections/${connectionId}/resources/read`, {
+      method: 'POST',
+      body: JSON.stringify({ uri }),
+    })
+  }
+
+  async getMcpPrompt(
+    connectionId: string,
+    promptName: string,
+    args?: Record<string, unknown>
+  ): Promise<McpPromptGetResultView> {
+    return this.request<McpPromptGetResultView>(`/api/v1/mcp/connections/${connectionId}/prompts/get`, {
+      method: 'POST',
+      body: JSON.stringify({ prompt_name: promptName, arguments: args }),
+    })
+  }
+
+  async getMcpHistory(connectionId: string, limit = 50): Promise<McpExecutionRecordView[]> {
+    return this.request<McpExecutionRecordView[]>(`/api/v1/mcp/connections/${connectionId}/history?limit=${limit}`)
   }
 }
 

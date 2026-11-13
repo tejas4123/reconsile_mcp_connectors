@@ -5,56 +5,6 @@ import { useAuth } from '../lib/auth/use-auth.ts'
 import { inspectJwt } from '../lib/auth/auth-client.ts'
 import { apiClient } from '../lib/api/api-client.ts'
 
-function base64UrlEncodeBytes(bytes: Uint8Array): string {
-  let binary = ''
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i])
-  }
-  return btoa(binary).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
-}
-
-function base64UrlEncodeString(str: string): string {
-  const bytes = new TextEncoder().encode(str)
-  return base64UrlEncodeBytes(bytes)
-}
-
-async function createDevToken(subject: string, tenant = 'acme-india'): Promise<string> {
-  const header = { alg: 'HS256', typ: 'JWT' }
-  const now = Math.floor(Date.now() / 1000)
-  const payload = {
-    iss: 'https://auth.reconcile.local',
-    aud: 'reconcile-mcp',
-    sub: subject || 'admin@acme-india.example',
-    azp: 'dashboard',
-    scope: 'recon:read recon:run recon:propose recon:approve recon:apply recon:admin',
-    tenant: tenant,
-    iat: now,
-    exp: now + 30 * 24 * 3600, // 30 days
-    jti:
-      typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : Math.random().toString(36).substring(2),
-  }
-
-  const encodedHeader = base64UrlEncodeString(JSON.stringify(header))
-  const encodedPayload = base64UrlEncodeString(JSON.stringify(payload))
-  const data = new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`)
-
-  // Backend development shared secret from RECONCILE_JWT_SECRET
-  const secret = 'change-me-dev-only-secret-at-least-32-bytes'
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  )
-  const sigBuffer = await crypto.subtle.sign('HMAC', key, data)
-  const encodedSig = base64UrlEncodeBytes(new Uint8Array(sigBuffer))
-
-  return `${encodedHeader}.${encodedPayload}.${encodedSig}`
-}
-
 export const LoginPage: React.FC = () => {
   const navigate = useNavigate()
   const location = useLocation()
@@ -87,9 +37,34 @@ export const LoginPage: React.FC = () => {
       try {
         let activeToken = trimmedPassword
 
-        // If the password is not already a raw 3-part JWT, map simple password to dev token
+        // If the password is not already a raw 3-part JWT, request token from server-side BFF auth
         if (!trimmedPassword.includes('.') || trimmedPassword.split('.').length !== 3) {
-          activeToken = await createDevToken(trimmedLogin, 'acme-india')
+          const authRes = await fetch(`${apiClient.getBaseUrl()}/api/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: trimmedLogin,
+              password: trimmedPassword,
+              tenant: apiClient.tenant,
+            }),
+          })
+          const authData = (await authRes.json().catch(() => ({}))) as {
+            success?: boolean
+            token?: string
+            error?: { message?: string }
+            detail?: string
+          }
+
+          if (!authRes.ok || !authData.token) {
+            setError(
+              authData.detail ||
+                authData.error?.message ||
+                'Authentication failed. Please verify your credentials.'
+            )
+            return
+          }
+
+          activeToken = authData.token
         }
 
         // Authenticate if token is a valid 3-part JWT
@@ -102,19 +77,6 @@ export const LoginPage: React.FC = () => {
                 : 'Invalid credentials. Please check your login ID and password.'
             )
             return
-          }
-
-          // Verify with backend service if reachable
-          const verifyResult = await apiClient.verifyCredentials(activeToken)
-          if (!verifyResult.success) {
-            if (verifyResult.status === 401) {
-              setError('Invalid credentials. Please check your login ID and password.')
-              return
-            }
-            if (verifyResult.status === 403) {
-              setError('Unauthorized account. Please contact your administrator.')
-              return
-            }
           }
 
           const res = await loginWithToken(activeToken, true)
@@ -233,7 +195,7 @@ export const LoginPage: React.FC = () => {
 
         {/* Small Notice */}
         <p className="text-center text-[11px] text-slate-400 mt-6">
-          Authorized users only.
+          Authorized users only. Enterprise multi-tenant security enforced.
         </p>
       </div>
     </div>

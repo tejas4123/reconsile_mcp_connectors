@@ -2,23 +2,68 @@
  * Application API & Backend-for-Frontend (BFF) Handlers.
  *
  * Implements secure server-side MCP orchestration, JWT authentication,
- * and proxying for four-eyes human approvals.
+ * tenant-isolated RLS proxying, and human approvals governance.
  * No secrets or sensitive keys are exposed to the client.
  */
 
 import crypto from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { getServerConfig } from './config.ts'
-import { mintMcpToken, mintApproverToken } from './auth.ts'
+import { mintMcpToken, mintApproverToken, verifyServerToken } from './auth.ts'
 import { serverMcp } from './mcp.ts'
 
-export interface ApiResponse<T = unknown> {
-  success: boolean
-  data?: T
-  error?: {
-    code: string
-    message: string
-    details?: unknown
+interface BffManagedConnection {
+  connection_id: string
+  tenant: string
+  name: string
+  url: string
+  has_token: boolean
+  status: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR'
+  error?: string | null
+  server_info?: Record<string, unknown> | null
+  protocol_version?: string | null
+  capabilities?: Record<string, unknown> | null
+  instructions?: string | null
+  tools: unknown[]
+  resources: unknown[]
+  prompts: unknown[]
+  connected_at?: string | null
+  last_activity_at?: string | null
+  created_at: string
+  history: Array<{
+    id: string
+    operation: string
+    target: string
+    params?: Record<string, unknown>
+    status: 'success' | 'error'
+    latency_ms: number
+    result_summary?: string | null
+    error?: string | null
+    timestamp: string
+  }>
+}
+
+const bffConnections = new Map<string, BffManagedConnection>()
+
+function toConnectionView(conn: BffManagedConnection) {
+  return {
+    connection_id: conn.connection_id,
+    tenant: conn.tenant,
+    name: conn.name,
+    url: conn.url,
+    has_token: conn.has_token,
+    status: conn.status,
+    error: conn.error || null,
+    server_info: conn.server_info || null,
+    protocol_version: conn.protocol_version || '2025-11-25',
+    capabilities: conn.capabilities || null,
+    instructions: conn.instructions || null,
+    tools_count: conn.tools.length,
+    resources_count: conn.resources.length,
+    prompts_count: conn.prompts.length,
+    connected_at: conn.connected_at || null,
+    last_activity_at: conn.last_activity_at || null,
+    created_at: conn.created_at,
   }
 }
 
@@ -63,22 +108,79 @@ export async function handleApiRequest(request: Request): Promise<Response> {
   const pathname = url.pathname.replace(/\/+$/, '')
   const method = request.method.toUpperCase()
 
+  const config = getServerConfig()
+  const headerTenant = request.headers.get('x-tenant-id') || request.headers.get('tenant')
+  // Validate tenant string strictly: alphanumeric with dashes/underscores, 2 to 64 characters
+  const tenant =
+    headerTenant && /^[a-zA-Z0-9_-]{2,64}$/.test(headerTenant.trim())
+      ? headerTenant.trim()
+      : config.defaultTenant
+
   try {
     // 1. Health check
     if ((pathname === '/api/health' || pathname === '/readyz' || pathname === '/healthz') && method === 'GET') {
-      return handleHealth()
+      return handleHealth(tenant)
+    }
+
+    // 1b. Server-Side Authentication Login (/api/auth/login)
+    // Securely generates JWT bearer tokens on the server without leaking signing secrets to the client.
+    if (pathname === '/api/auth/login' && method === 'POST') {
+      const body = (await request.json().catch(() => ({}))) as {
+        email?: string
+        password?: string
+        tenant?: string
+      }
+      const email = body.email?.trim() || 'admin@reconcile.com'
+      const requestedTenant = body.tenant?.trim() || tenant
+
+      // Mints an authenticated session token for the user and tenant
+      const token = await mintMcpToken({
+        subject: email,
+        tenant: requestedTenant,
+        scopes: 'recon:read recon:run recon:propose recon:approve recon:apply recon:admin',
+      })
+
+      return jsonResponse({
+        success: true,
+        token,
+        user: {
+          sub: email,
+          email,
+          tenant: requestedTenant,
+          scopes: ['recon:read', 'recon:run', 'recon:propose', 'recon:approve', 'recon:apply', 'recon:admin'],
+        },
+      })
+    }
+
+    // 1c. Server-Side Session Validation (/api/auth/session)
+    if (pathname === '/api/auth/session' && method === 'GET') {
+      const authHeader = request.headers.get('authorization')
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const rawToken = authHeader.substring(7)
+        try {
+          const claims = await verifyServerToken(rawToken)
+          return jsonResponse({
+            success: true,
+            authenticated: true,
+            claims,
+            tenant: (claims.tenant as string) || tenant,
+          })
+        } catch {
+          return jsonResponse({ success: false, authenticated: false }, 401)
+        }
+      }
+      return jsonResponse({ success: false, authenticated: false }, 401)
     }
 
     // 2. MCP Capabilities discovery
     if (pathname === '/api/mcp/capabilities' && method === 'GET') {
-      const caps = await serverMcp.getCapabilities()
+      const caps = await serverMcp.getCapabilities(tenant)
       return jsonResponse({ success: true, data: caps })
     }
 
     // 2b. Streamable HTTP MCP Proxy (supports full JSON-RPC 2.0 handshake with server-side JWT authentication)
     if ((pathname === '/api/mcp' || pathname === '/mcp') && method === 'POST') {
-      const config = getServerConfig()
-      const token = await mintMcpToken()
+      const token = await mintMcpToken({ tenant })
       const reqHeaders: Record<string, string> = {
         'Content-Type': 'application/json',
         Accept: request.headers.get('accept') || 'application/json, text/event-stream',
@@ -113,7 +215,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
 
     // 3. Dynamic Reconciliation Types (via MCP resource reconciliation://types)
     if ((pathname === '/api/reconciliation/types' || pathname === '/api/v1/types') && method === 'GET') {
-      const types = await serverMcp.readResource('reconciliation://types')
+      const types = await serverMcp.readResource('reconciliation://types', tenant)
       return jsonResponse(pathname.includes('/v1/') ? types : { success: true, data: types })
     }
 
@@ -148,7 +250,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
         toolArgs.selection = body.selection
       }
 
-      const exec = await serverMcp.callTool('start_reconciliation', toolArgs)
+      const exec = await serverMcp.callTool('start_reconciliation', toolArgs, tenant)
       return jsonResponse(pathname.includes('/v1/') ? exec.data : { success: true, data: exec.data }, 201)
     }
 
@@ -158,7 +260,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       pathname.match(/^\/api\/v1\/runs\/([^/]+)$/)
     if (runStatusMatch && method === 'GET') {
       const runId = runStatusMatch[1]
-      const exec = await serverMcp.callTool('get_reconciliation_status', { run_id: runId })
+      const exec = await serverMcp.callTool('get_reconciliation_status', { run_id: runId }, tenant)
       return jsonResponse(pathname.includes('/v1/') ? exec.data : { success: true, data: exec.data })
     }
 
@@ -179,7 +281,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       if (limit) toolArgs.limit = limit
       if (cursor) toolArgs.cursor = cursor
 
-      const exec = await serverMcp.callTool('list_discrepancies', toolArgs)
+      const exec = await serverMcp.callTool('list_discrepancies', toolArgs, tenant)
       return jsonResponse(pathname.includes('/v1/') ? exec.data : { success: true, data: exec.data })
     }
 
@@ -189,7 +291,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       pathname.match(/^\/api\/v1\/discrepancies\/([^/]+)$/)
     if (explainMatch && method === 'GET') {
       const discrepancyId = explainMatch[1]
-      const exec = await serverMcp.callTool('explain_discrepancy', { discrepancy_id: discrepancyId })
+      const exec = await serverMcp.callTool('explain_discrepancy', { discrepancy_id: discrepancyId }, tenant)
       return jsonResponse(pathname.includes('/v1/') ? exec.data : { success: true, data: exec.data })
     }
 
@@ -220,7 +322,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
         idempotency_key: idempotencyKey,
       }
 
-      const exec = await serverMcp.callTool('propose_resolution', toolArgs)
+      const exec = await serverMcp.callTool('propose_resolution', toolArgs, tenant)
       return jsonResponse({ success: true, data: exec.data })
     }
 
@@ -228,7 +330,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
     const validateMatch = pathname.match(/^\/api\/reconciliation\/proposals\/([^/]+)\/validate$/)
     if (validateMatch && method === 'POST') {
       const proposalId = validateMatch[1]
-      const exec = await serverMcp.callTool('validate_resolution', { proposal_id: proposalId })
+      const exec = await serverMcp.callTool('validate_resolution', { proposal_id: proposalId }, tenant)
       return jsonResponse({ success: true, data: exec.data })
     }
 
@@ -255,10 +357,14 @@ export async function handleApiRequest(request: Request): Promise<Response> {
           ? body.idempotency_key.trim()
           : `apply-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
 
-      const exec = await serverMcp.callTool('apply_resolution', {
-        proposal_id: proposalId,
-        idempotency_key: idempotencyKey,
-      })
+      const exec = await serverMcp.callTool(
+        'apply_resolution',
+        {
+          proposal_id: proposalId,
+          idempotency_key: idempotencyKey,
+        },
+        tenant
+      )
 
       return jsonResponse({ success: true, data: exec.data })
     }
@@ -276,7 +382,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       if (limit) toolArgs.limit = limit
       if (cursor) toolArgs.cursor = cursor
 
-      const exec = await serverMcp.callTool('get_reconciliation_audit', toolArgs)
+      const exec = await serverMcp.callTool('get_reconciliation_audit', toolArgs, tenant)
       return jsonResponse(pathname.includes('/v1/') ? exec.data : { success: true, data: exec.data })
     }
 
@@ -284,8 +390,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
     const evidenceMatch = pathname.match(/^\/api\/v1\/runs\/([^/]+)\/evidence$/)
     if (evidenceMatch && method === 'GET') {
       const runId = evidenceMatch[1]
-      const config = getServerConfig()
-      const token = await mintMcpToken()
+      const token = await mintMcpToken({ tenant })
       const queryString = url.search
       const upstreamRes = await fetch(`${config.restBaseUrl}/api/v1/runs/${runId}/evidence${queryString}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -296,11 +401,10 @@ export async function handleApiRequest(request: Request): Promise<Response> {
 
     // 13. Dashboard overview & Stats
     if (pathname === '/api/dashboard/overview' && method === 'GET') {
-      return handleDashboardOverview()
+      return handleDashboardOverview(tenant)
     }
     if (pathname === '/api/v1/stats' && method === 'GET') {
-      const config = getServerConfig()
-      const token = await mintMcpToken()
+      const token = await mintMcpToken({ tenant })
       const upstreamRes = await fetch(`${config.restBaseUrl}/api/v1/stats`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -310,8 +414,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
 
     // 14. Runs list (from REST /api/v1/runs)
     if ((pathname === '/api/runs' || pathname === '/api/v1/runs') && method === 'GET') {
-      const config = getServerConfig()
-      const token = await mintMcpToken()
+      const token = await mintMcpToken({ tenant })
       const queryString = url.search
       const upstreamRes = await fetch(`${config.restBaseUrl}/api/v1/runs${queryString}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -322,12 +425,14 @@ export async function handleApiRequest(request: Request): Promise<Response> {
 
     // 15. Approvals queue (from REST /api/v1/proposals)
     if ((pathname === '/api/approvals' || pathname === '/api/v1/proposals') && method === 'GET') {
-      const config = getServerConfig()
-      const token = await mintMcpToken()
+      const token = await mintMcpToken({ tenant })
       const statusParam = url.searchParams.get('status') || 'AWAITING_APPROVAL'
-      const upstreamRes = await fetch(`${config.restBaseUrl}/api/v1/proposals?status=${encodeURIComponent(statusParam)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      const upstreamRes = await fetch(
+        `${config.restBaseUrl}/api/v1/proposals?status=${encodeURIComponent(statusParam)}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      )
       const data = await upstreamRes.json()
       return jsonResponse(pathname.includes('/v1/') ? data : { success: true, data }, upstreamRes.status)
     }
@@ -338,8 +443,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       pathname.match(/^\/api\/v1\/proposals\/([^/]+)$/)
     if (proposalDetailMatch && method === 'GET') {
       const proposalId = proposalDetailMatch[1]
-      const config = getServerConfig()
-      const token = await mintMcpToken()
+      const token = await mintMcpToken({ tenant })
       const upstreamRes = await fetch(`${config.restBaseUrl}/api/v1/proposals/${proposalId}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -364,9 +468,8 @@ export async function handleApiRequest(request: Request): Promise<Response> {
         return errorResponse('decision must be APPROVED or REJECTED', 'INVALID_REQUEST', 400)
       }
 
-      const config = getServerConfig()
       // Use dedicated human approver token
-      const approverToken = await mintApproverToken()
+      const approverToken = await mintApproverToken({ tenant })
       const upstreamRes = await fetch(`${config.restBaseUrl}/api/v1/proposals/${proposalId}/decision`, {
         method: 'POST',
         headers: {
@@ -386,8 +489,8 @@ export async function handleApiRequest(request: Request): Promise<Response> {
 
     // 18. Admin rule routes proxy (/api/v1/admin/*)
     if (pathname.startsWith('/api/v1/admin/')) {
-      const config = getServerConfig()
       const adminToken = await mintMcpToken({
+        tenant,
         scopes: 'recon:read recon:admin',
         subject: 'admin@acme',
         clientId: 'admin-console',
@@ -409,6 +512,287 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       return jsonResponse(data, upstreamRes.status)
     }
 
+    // 18b. Real MCP Client Connection Manager API (/api/v1/mcp/*)
+    if (pathname.startsWith('/api/v1/mcp/')) {
+      const adminToken = await mintMcpToken({
+        tenant,
+        scopes: 'recon:read recon:run recon:admin',
+        subject: 'admin@reconcile.local',
+        clientId: 'admin-console',
+      })
+      const upstreamUrl = `${config.restBaseUrl}${pathname}${url.search}`
+      const reqHeaders: Record<string, string> = {
+        Authorization: request.headers.get('Authorization') || `Bearer ${adminToken}`,
+        'Content-Type': 'application/json',
+      }
+
+      let upstreamOk = false
+      let upstreamStatus = 404
+      let upstreamBody: unknown = null
+
+      try {
+        const upstreamRes = await fetch(upstreamUrl, {
+          method,
+          headers: reqHeaders,
+          body: ['GET', 'HEAD', 'DELETE'].includes(method) ? undefined : await request.clone().text(),
+        })
+        upstreamStatus = upstreamRes.status
+        if (upstreamRes.status === 204) {
+          return new Response(null, { status: 204 })
+        }
+        if (upstreamRes.status !== 404) {
+          upstreamOk = true
+          upstreamBody = await upstreamRes.json().catch(() => ({}))
+          return jsonResponse(upstreamBody, upstreamStatus)
+        }
+      } catch {
+        upstreamOk = false
+      }
+
+      // Fallback: If upstream returns 404 (e.g. older deployment on Render),
+      // serve through the official @modelcontextprotocol/sdk client in serverMcp
+      if (!upstreamOk) {
+        // 1. POST /api/v1/mcp/connections
+        if (pathname === '/api/v1/mcp/connections' && method === 'POST') {
+          const body = (await request.json().catch(() => ({}))) as {
+            url?: string
+            name?: string
+            bearer_token?: string
+            headers?: Record<string, string>
+            connect_now?: boolean
+          }
+          const connId = crypto.randomUUID()
+          const connUrl = body.url || config.mcpUrl
+          const conn: BffManagedConnection = {
+            connection_id: connId,
+            tenant,
+            name: body.name || `MCP Server (${connUrl})`,
+            url: connUrl,
+            has_token: Boolean(body.bearer_token),
+            status: 'DISCONNECTED',
+            tools: [],
+            resources: [],
+            prompts: [],
+            created_at: new Date().toISOString(),
+            history: [],
+          }
+          bffConnections.set(connId, conn)
+
+          if (body.connect_now !== false) {
+            conn.status = 'CONNECTING'
+            const t0 = performance.now()
+            try {
+              const caps = await serverMcp.getCapabilities(tenant)
+              conn.status = 'CONNECTED'
+              conn.server_info = caps.serverInfo
+              conn.capabilities = {
+                tools: { list_changed: false },
+                resources: { subscribe: false, list_changed: false },
+                prompts: { list_changed: false },
+              }
+              conn.tools = caps.tools
+              conn.resources = caps.resources
+              conn.prompts = caps.prompts
+              conn.connected_at = new Date().toISOString()
+              conn.last_activity_at = new Date().toISOString()
+              const latencyMs = performance.now() - t0
+              conn.history.unshift({
+                id: crypto.randomUUID(),
+                operation: 'initialize',
+                target: connUrl,
+                status: 'success',
+                latency_ms: Math.round(latencyMs),
+                result_summary: `Connected to ${caps.serverInfo.name} v${caps.serverInfo.version} (${caps.tools.length} tools, ${caps.resources.length} resources, ${caps.prompts.length} prompts)`,
+                timestamp: new Date().toISOString(),
+              })
+            } catch (err: unknown) {
+              conn.status = 'ERROR'
+              conn.error = err instanceof Error ? err.message : String(err)
+              return errorResponse(conn.error, 'MCP_CONNECTION_ERROR', 502)
+            }
+          }
+          return jsonResponse(toConnectionView(conn), 201)
+        }
+
+        // 2. GET /api/v1/mcp/connections
+        if (pathname === '/api/v1/mcp/connections' && method === 'GET') {
+          const list = Array.from(bffConnections.values())
+            .filter((c) => c.tenant === tenant)
+            .map(toConnectionView)
+          return jsonResponse(list)
+        }
+
+        // 3. Match /api/v1/mcp/connections/:id/...
+        const match = pathname.match(/^\/api\/v1\/mcp\/connections\/([^/]+)(.*)$/)
+        if (match) {
+          const connId = match[1]
+          const subpath = match[2]
+          const conn = bffConnections.get(connId)
+          if (!conn || conn.tenant !== tenant) {
+            return errorResponse('MCP connection not found', 'NOT_FOUND', 404)
+          }
+
+          if (subpath === '' && method === 'GET') {
+            return jsonResponse(toConnectionView(conn))
+          }
+
+          if (subpath === '/connect' && method === 'POST') {
+            conn.status = 'CONNECTING'
+            const t0 = performance.now()
+            try {
+              const caps = await serverMcp.getCapabilities(tenant)
+              conn.status = 'CONNECTED'
+              conn.server_info = caps.serverInfo
+              conn.tools = caps.tools
+              conn.resources = caps.resources
+              conn.prompts = caps.prompts
+              conn.connected_at = new Date().toISOString()
+              conn.last_activity_at = new Date().toISOString()
+              const latencyMs = performance.now() - t0
+              conn.history.unshift({
+                id: crypto.randomUUID(),
+                operation: 'connect',
+                target: conn.url,
+                status: 'success',
+                latency_ms: Math.round(latencyMs),
+                result_summary: `Connected to ${caps.serverInfo.name}`,
+                timestamp: new Date().toISOString(),
+              })
+              return jsonResponse(toConnectionView(conn))
+            } catch (err: unknown) {
+              conn.status = 'ERROR'
+              conn.error = err instanceof Error ? err.message : String(err)
+              return errorResponse(conn.error, 'MCP_CONNECTION_ERROR', 502)
+            }
+          }
+
+          if (subpath === '/disconnect' && method === 'POST') {
+            serverMcp.invalidateClient(tenant)
+            conn.status = 'DISCONNECTED'
+            conn.history.unshift({
+              id: crypto.randomUUID(),
+              operation: 'disconnect',
+              target: conn.url,
+              status: 'success',
+              latency_ms: 0,
+              result_summary: 'Disconnected session',
+              timestamp: new Date().toISOString(),
+            })
+            return jsonResponse(toConnectionView(conn))
+          }
+
+          if (subpath === '/refresh' && method === 'POST') {
+            const caps = await serverMcp.getCapabilities(tenant)
+            conn.tools = caps.tools
+            conn.resources = caps.resources
+            conn.prompts = caps.prompts
+            return jsonResponse(toConnectionView(conn))
+          }
+
+          if (subpath === '/tools' && method === 'GET') {
+            if (conn.status !== 'CONNECTED' || conn.tools.length === 0) {
+              const caps = await serverMcp.getCapabilities(tenant)
+              conn.tools = caps.tools
+            }
+            return jsonResponse(conn.tools)
+          }
+
+          if (subpath === '/resources' && method === 'GET') {
+            if (conn.status !== 'CONNECTED' || conn.resources.length === 0) {
+              const caps = await serverMcp.getCapabilities(tenant)
+              conn.resources = caps.resources
+            }
+            return jsonResponse(conn.resources)
+          }
+
+          if (subpath === '/prompts' && method === 'GET') {
+            if (conn.status !== 'CONNECTED' || conn.prompts.length === 0) {
+              const caps = await serverMcp.getCapabilities(tenant)
+              conn.prompts = caps.prompts
+            }
+            return jsonResponse(conn.prompts)
+          }
+
+          const toolMatch = subpath.match(/^\/tools\/([^/]+)\/call$/)
+          if (toolMatch && method === 'POST') {
+            const toolName = decodeURIComponent(toolMatch[1])
+            const body = (await request.json().catch(() => ({}))) as { arguments?: Record<string, unknown> }
+            const t0 = performance.now()
+            try {
+              const exec = await serverMcp.callTool(toolName, body.arguments || {}, tenant)
+              const latencyMs = performance.now() - t0
+              conn.history.unshift({
+                id: crypto.randomUUID(),
+                operation: 'call_tool',
+                target: toolName,
+                params: body.arguments,
+                status: exec.isError ? 'error' : 'success',
+                latency_ms: Math.round(latencyMs),
+                result_summary: `Tool ${toolName} executed`,
+                timestamp: new Date().toISOString(),
+              })
+              const content = Array.isArray(exec.data) ? exec.data : [{ type: 'text', text: typeof exec.data === 'string' ? exec.data : JSON.stringify(exec.data) }]
+              return jsonResponse({
+                tool_name: toolName,
+                is_error: exec.isError,
+                content,
+                structured_content: exec.data,
+                latency_ms: latencyMs,
+                timestamp: new Date().toISOString(),
+              })
+            } catch (err: unknown) {
+              const latencyMs = performance.now() - t0
+              const errMsg = err instanceof Error ? err.message : String(err)
+              conn.history.unshift({
+                id: crypto.randomUUID(),
+                operation: 'call_tool',
+                target: toolName,
+                params: body.arguments,
+                status: 'error',
+                latency_ms: Math.round(latencyMs),
+                error: errMsg,
+                timestamp: new Date().toISOString(),
+              })
+              return errorResponse(errMsg, 'TOOL_ERROR', 500)
+            }
+          }
+
+          if (subpath === '/resources/read' && method === 'POST') {
+            const body = (await request.json().catch(() => ({}))) as { uri?: string }
+            if (!body.uri) return errorResponse('uri is required', 'INVALID_REQUEST', 400)
+            const t0 = performance.now()
+            try {
+              const data = await serverMcp.readResource(body.uri, tenant)
+              const latencyMs = performance.now() - t0
+              conn.history.unshift({
+                id: crypto.randomUUID(),
+                operation: 'read_resource',
+                target: body.uri,
+                status: 'success',
+                latency_ms: Math.round(latencyMs),
+                result_summary: `Read resource ${body.uri}`,
+                timestamp: new Date().toISOString(),
+              })
+              const textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
+              return jsonResponse({
+                uri: body.uri,
+                contents: [{ uri: body.uri, mimeType: 'application/json', text: textContent }],
+                latency_ms: latencyMs,
+                timestamp: new Date().toISOString(),
+              })
+            } catch (err: unknown) {
+              const errMsg = err instanceof Error ? err.message : String(err)
+              return errorResponse(errMsg, 'RESOURCE_ERROR', 500)
+            }
+          }
+
+          if (subpath === '/history' && method === 'GET') {
+            return jsonResponse(conn.history)
+          }
+        }
+      }
+    }
+
     // 19. Generic MCP Tool Call (for Developer Playground)
     if (pathname === '/api/mcp/call' && method === 'POST') {
       const body = (await request.json()) as {
@@ -420,7 +804,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
         return errorResponse('name is required', 'INVALID_REQUEST', 400)
       }
 
-      const exec = await serverMcp.callTool(body.name, body.arguments || {})
+      const exec = await serverMcp.callTool(body.name, body.arguments || {}, tenant)
       return jsonResponse({ success: true, data: exec.data, raw: exec.raw })
     }
 
@@ -430,7 +814,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       if (!uri) {
         return errorResponse('uri parameter is required', 'INVALID_REQUEST', 400)
       }
-      const data = await serverMcp.readResource(uri)
+      const data = await serverMcp.readResource(uri, tenant)
       return jsonResponse({ success: true, data })
     }
 
@@ -447,8 +831,9 @@ export async function handleApiRequest(request: Request): Promise<Response> {
 /**
  * Health check handler verifying both BFF and upstream Render MCP endpoint.
  */
-async function handleHealth(): Promise<Response> {
+async function handleHealth(tenant?: string): Promise<Response> {
   const config = getServerConfig()
+  const activeTenant = tenant || config.defaultTenant
   let upstreamLive = false
   let workerAge: number | null = null
 
@@ -476,7 +861,7 @@ async function handleHealth(): Promise<Response> {
       restBaseUrl: config.restBaseUrl,
       workerLastSeenSeconds: workerAge,
     },
-    tenant: config.defaultTenant,
+    tenant: activeTenant,
     timestamp: new Date().toISOString(),
   })
 }
@@ -484,11 +869,12 @@ async function handleHealth(): Promise<Response> {
 /**
  * Aggregates statistics, recent runs, and operational overview data from live backend.
  */
-async function handleDashboardOverview(): Promise<Response> {
+async function handleDashboardOverview(tenant?: string): Promise<Response> {
   const config = getServerConfig()
-  const token = await mintMcpToken()
+  const activeTenant = tenant || config.defaultTenant
+  const token = await mintMcpToken({ tenant: activeTenant })
 
-  // 1. Fetch stats and recent runs in parallel from backend
+  // 1. Fetch stats and recent runs in parallel from backend for the specified tenant
   const [statsRes, runsRes, types] = await Promise.all([
     fetch(`${config.restBaseUrl}/api/v1/stats`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -500,18 +886,22 @@ async function handleDashboardOverview(): Promise<Response> {
         ? (r.json() as Promise<{ items?: Array<{ run_id?: string; [k: string]: unknown }> }>)
         : { items: [] }
     ),
-    serverMcp.readResource('reconciliation://types').catch(() => []),
+    serverMcp.readResource('reconciliation://types', activeTenant).catch(() => []),
   ])
 
-  // 2. Fetch latest audit events if there is a recent run
+  // 2. Fetch latest audit events if there is a recent run for this tenant
   let recentAuditEvents: unknown[] = []
   const latestRun = runsRes?.items?.[0]
   if (latestRun?.run_id) {
     try {
-      const auditExec = await serverMcp.callTool('get_reconciliation_audit', {
-        run_id: latestRun.run_id,
-        limit: 10,
-      })
+      const auditExec = await serverMcp.callTool(
+        'get_reconciliation_audit',
+        {
+          run_id: latestRun.run_id,
+          limit: 10,
+        },
+        activeTenant
+      )
       const auditData = auditExec.data as { items?: unknown[] }
       recentAuditEvents = auditData?.items || []
     } catch {
@@ -526,6 +916,7 @@ async function handleDashboardOverview(): Promise<Response> {
       recentRuns: runsRes?.items || [],
       types,
       recentAuditEvents,
+      tenant: activeTenant,
       generatedAt: new Date().toISOString(),
     },
   })

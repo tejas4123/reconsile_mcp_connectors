@@ -440,3 +440,74 @@ export interface McpToolMeta {
     required: boolean
   }>
 }
+
+export interface McpConnectionView {
+  connection_id: string
+  tenant: string
+  name: string
+  url: string
+  has_token: boolean
+  status: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR'
+  error?: string | null
+  server_info?: {
+    name: string
+    version: string
+    title?: string
+    description?: string
+    [key: string]: unknown
+  } | null
+  protocol_version?: string | null
+  capabilities?: {
+    tools?: Record<string, unknown>
+    resources?: Record<string, unknown>
+    prompts?: Record<string, unknown>
+    [key: string]: unknown
+  } | null
+  instructions?: string | null
+  tools_count: number
+  resources_count: number
+  prompts_count: number
+  connected_at?: string | null
+  last_activity_at?: string | null
+  created_at: string
+}
+
+export interface McpToolCallResultView {
+  tool_name: string
+  is_error: boolean
+  content: Array<{ type: string; text?: string; [k: string]: unknown }>
+  structured_content?: unknown
+  meta?: Record<string, unknown> | null
+  latency_ms: number
+  timestamp: string
+}
+
+export interface McpResourceReadResultView {
+  uri: string
+  contents: Array<{ uri?: string; mimeType?: string; text?: string; blob?: string; [k: string]: unknown }>
+  meta?: Record<string, unknown> | null
+  latency_ms: number
+  timestamp: string
+}
+
+export interface McpPromptGetResultView {
+  prompt_name: string
+  description?: string | null
+  messages: Array<{ role: string; content: { type: string; text?: string; [k: string]: unknown }; [k: string]: unknown }>
+  meta?: Record<string, unknown> | null
+  latency_ms: number
+  timestamp: string
+}
+
+export interface McpExecutionRecordView {
+  id: string
+  operation: string
+  target: string
+  params?: Record<string, unknown>
+  status: 'success' | 'error'
+  latency_ms: number
+  result_summary?: string | null
+  error?: string | null
+  timestamp: string
+}
+

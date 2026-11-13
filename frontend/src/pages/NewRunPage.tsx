@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   AlertOctagon,
@@ -39,7 +39,7 @@ interface ReconciliationOption {
   roleName: string
 }
 
-const RECONCILIATION_OPTIONS: ReconciliationOption[] = [
+const DEFAULT_OPTIONS: ReconciliationOption[] = [
   {
     key: 'invoice_to_po',
     title: 'Invoice vs Purchase Order',
@@ -53,14 +53,14 @@ const RECONCILIATION_OPTIONS: ReconciliationOption[] = [
     roleName: 'invoice',
   },
   {
-    key: 'vendor_compliance',
+    key: 'vendor_certificate_compliance',
     title: 'Vendor Compliance',
-    description: 'Verify supplier tax standing, registration certificates, and compliance regulatory blacklists.',
+    description: 'Verify supplier tax standing, registration certificates, and compliance regulatory policies.',
     systems: 'Procurement & Tax Registry',
     icon: ShieldCheck,
     fieldLabel: 'Vendor Master Code / Tax ID',
     fieldPlaceholder: 'e.g. V-1001',
-    fieldHelp: 'Enter the vendor identifier to audit compliance records.',
+    fieldHelp: 'Enter the vendor identifier to audit compliance and certificate records.',
     demoValue: 'V-1001',
     roleName: 'vendor',
   },
@@ -93,8 +93,9 @@ const RECONCILIATION_OPTIONS: ReconciliationOption[] = [
 export const NewRunPage: React.FC = () => {
   const { client, addToast } = useApi()
 
+  const [options, setOptions] = useState<ReconciliationOption[]>(DEFAULT_OPTIONS)
   const [selectedKey, setSelectedKey] = useState<string>('invoice_to_po')
-  const [recordId, setRecordId] = useState<string>('INV-2026-0042')
+  const [recordId, setRecordId] = useState<string>('')
 
   const [submitting, setSubmitting] = useState(false)
   const [loadingStage, setLoadingStage] = useState<string>('')
@@ -106,13 +107,42 @@ export const NewRunPage: React.FC = () => {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [batchLimit, setBatchLimit] = useState(100)
 
+  // Dynamically load workflow types from backend MCP resource reconciliation://types
+  useEffect(() => {
+    async function loadTypes() {
+      try {
+        const types = await client.getReconciliationTypes()
+        if (Array.isArray(types) && types.length > 0) {
+          const mapped = DEFAULT_OPTIONS.map((opt) => {
+            const found = types.find((t) => t.key === opt.key)
+            if (found) {
+              const reqRefs = found.source_refs_required || {}
+              const firstRole = Object.keys(reqRefs)[0] || opt.roleName
+              return {
+                ...opt,
+                title: found.title || opt.title,
+                description: found.description || opt.description,
+                roleName: firstRole,
+                fieldHelp: reqRefs[firstRole] || opt.fieldHelp,
+              }
+            }
+            return opt
+          })
+          setOptions(mapped)
+        }
+      } catch {
+        // Fallback to DEFAULT_OPTIONS if offline
+      }
+    }
+    loadTypes()
+  }, [client])
+
   const activeOption =
-    RECONCILIATION_OPTIONS.find((opt) => opt.key === selectedKey) ||
-    RECONCILIATION_OPTIONS[0]
+    options.find((opt) => opt.key === selectedKey) || options[0]
 
   const handleSelectOption = (option: ReconciliationOption) => {
     setSelectedKey(option.key)
-    setRecordId(option.demoValue)
+    setRecordId('')
     setError(null)
     setResult(null)
     setDiscrepancies([])
@@ -120,8 +150,9 @@ export const NewRunPage: React.FC = () => {
 
   const handleStart = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!recordId.trim()) {
-      setError({ message: `Please provide a ${activeOption.fieldLabel.toLowerCase()}` })
+    const trimmedId = recordId.trim()
+    if (!trimmedId) {
+      setError({ message: `Please enter a valid ${activeOption.fieldLabel.toLowerCase()}.` })
       return
     }
 
@@ -130,7 +161,6 @@ export const NewRunPage: React.FC = () => {
     setResult(null)
     setDiscrepancies([])
 
-    // Simulated progress stages for executive clarity while network call executes
     setLoadingStage('Connecting to ERP & Invoicing systems via MCP...')
     const stageTimer1 = setTimeout(() => {
       setLoadingStage('Extracting records and comparing line items...')
@@ -144,7 +174,7 @@ export const NewRunPage: React.FC = () => {
         reconciliation_type: selectedKey,
         idempotency_key: generateUUID(),
         source_refs: {
-          [activeOption.roleName]: recordId.trim(),
+          [activeOption.roleName]: trimmedId,
         },
       }
 
@@ -156,7 +186,7 @@ export const NewRunPage: React.FC = () => {
           const discRes = await client.listRunDiscrepancies(res.run_id)
           setDiscrepancies(discRes.items || [])
         } catch {
-          // fallback if listing fails
+          // Fallback if listing fails
         }
       }
 
@@ -202,7 +232,7 @@ export const NewRunPage: React.FC = () => {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {RECONCILIATION_OPTIONS.map((option) => {
+          {options.map((option) => {
             const isSelected = option.key === selectedKey
             const Icon = option.icon
             return (
@@ -273,7 +303,10 @@ export const NewRunPage: React.FC = () => {
                 <input
                   type="text"
                   value={recordId}
-                  onChange={(e) => setRecordId(e.target.value)}
+                  onChange={(e) => {
+                    setRecordId(e.target.value)
+                    setError(null)
+                  }}
                   placeholder={activeOption.fieldPlaceholder}
                   required
                   className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm font-mono font-medium text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900 transition-colors"
@@ -281,16 +314,19 @@ export const NewRunPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Quick Demo Helper Chip */}
+            {/* Helper Chip to populate demo record if desired */}
             <div className="flex items-center gap-2 pt-1">
-              <span className="text-xs text-slate-400">Executive Demo:</span>
+              <span className="text-xs text-slate-400">Sample Reference:</span>
               <button
                 type="button"
-                onClick={() => setRecordId(activeOption.demoValue)}
-                className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-200 transition-colors"
+                onClick={() => {
+                  setRecordId(activeOption.demoValue)
+                  setError(null)
+                }}
+                className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-200 transition-colors cursor-pointer"
               >
                 <Sparkles className="h-3 w-3 text-amber-500" />
-                <span>Use Sample {activeOption.demoValue}</span>
+                <span>Fill {activeOption.demoValue}</span>
               </button>
             </div>
           </div>
@@ -339,9 +375,9 @@ export const NewRunPage: React.FC = () => {
                 onClick={() => {
                   setResult(null)
                   setDiscrepancies([])
-                  setRecordId(activeOption.demoValue)
+                  setRecordId('')
                 }}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
                 <span>Run Another</span>
@@ -397,7 +433,7 @@ export const NewRunPage: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-slate-50 rounded-xl p-4 text-xs">
             <div>
               <span className="text-slate-400 font-medium">Reconciled Item</span>
-              <p className="font-mono font-bold text-slate-900 mt-0.5">{recordId}</p>
+              <p className="font-mono font-bold text-slate-900 mt-0.5">{recordId || 'Batch Run'}</p>
             </div>
             <div>
               <span className="text-slate-400 font-medium">Reconciliation Type</span>
@@ -451,12 +487,12 @@ export const NewRunPage: React.FC = () => {
         </div>
       )}
 
-      {/* Advanced Settings Accordion (Preserved for Power Users without cluttering executive demo) */}
+      {/* Advanced Settings Accordion */}
       <div className="pt-4 border-t border-slate-200/60">
         <button
           type="button"
           onClick={() => setShowAdvanced(!showAdvanced)}
-          className="flex items-center gap-2 text-xs font-semibold text-slate-400 hover:text-slate-700 transition-colors"
+          className="flex items-center gap-2 text-xs font-semibold text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
         >
           <ChevronDown
             className={`h-3.5 w-3.5 transition-transform ${

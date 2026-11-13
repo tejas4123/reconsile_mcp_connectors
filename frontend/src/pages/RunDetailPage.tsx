@@ -250,7 +250,7 @@ export const RunDetailPage: React.FC = () => {
                 <p className="font-bold text-slate-900 mt-0.5 font-mono">
                   {discrepancies.length > 0 && discrepancies[0].difference
                     ? formatDifference(discrepancies[0].difference)
-                    : '₹0.00 (0%)'}
+                    : 'None (0%)'}
                 </p>
               </div>
 
@@ -344,7 +344,8 @@ export const RunDetailPage: React.FC = () => {
                 <div className="rounded-lg bg-slate-50/80 p-3 text-xs text-slate-700 space-y-1">
                   <span className="font-bold text-slate-900">Root Cause Rationale:</span>
                   <p className="text-slate-600">
-                    The supplier submitted invoice #{d.entity_ref} billing {String(d.source_a_value)}, whereas the authorized purchase order in the ERP specifies {String(d.source_b_value)}. The calculated difference of {formatDifference(d.difference)} requires formal review.
+                    {d.reason ||
+                      `The record specifies ${String(d.source_a_value)} in Source A, whereas Source B specifies ${String(d.source_b_value)}. The calculated difference of ${formatDifference(d.difference)} requires formal review.`}
                   </p>
                 </div>
               </div>

@@ -1,7 +1,8 @@
 /**
  * Server-Side MCP Client Manager using the official @modelcontextprotocol/sdk.
  *
- * Manages Streamable HTTP transport, session headers, cold starts, and tool dispatching.
+ * Manages Streamable HTTP transport, tenant-isolated sessions, session headers,
+ * cold starts, and tool dispatching.
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -15,59 +16,83 @@ export interface McpExecutionResult<T = unknown> {
   raw: unknown
 }
 
+interface TenantSession {
+  client: Client
+  transport: StreamableHTTPClientTransport
+  token: string
+  tokenExpiresAt: number
+  isConnecting: boolean
+}
+
 class ServerMcpService {
-  private client: Client | null = null
-  private transport: StreamableHTTPClientTransport | null = null
-  private token: string | null = null
-  private tokenExpiresAt = 0
-  private isConnecting = false
+  private sessions = new Map<string, TenantSession>()
 
   /**
-   * Returns a connected MCP client, refreshing tokens and sessions as needed.
+   * Returns a connected MCP client for the specified tenant, refreshing tokens and sessions as needed.
    */
-  public async getClient(): Promise<Client> {
+  public async getClient(tenant?: string): Promise<Client> {
+    const config = getServerConfig()
+    const activeTenant = tenant || config.defaultTenant
     const now = Math.floor(Date.now() / 1000)
 
-    // Check if we need to reconnect or refresh token
-    if (this.client && this.transport && this.token && this.tokenExpiresAt > now + 60) {
-      return this.client
+    let session = this.sessions.get(activeTenant)
+
+    // Check if we already have an active, valid session for this tenant
+    if (session && session.client && session.transport && session.token && session.tokenExpiresAt > now + 60) {
+      return session.client
     }
 
-    // If another call is currently connecting, wait briefly
-    if (this.isConnecting) {
+    // If another call is currently connecting for this tenant, wait briefly
+    if (session?.isConnecting) {
       let attempts = 0
-      while (this.isConnecting && attempts < 40) {
+      while (session?.isConnecting && attempts < 40) {
         await new Promise((r) => setTimeout(r, 100))
         attempts++
+        session = this.sessions.get(activeTenant)
       }
-      if (this.client) return this.client
+      if (session?.client) return session.client
     }
 
-    this.isConnecting = true
+    // Initialize or mark connecting
+    if (!session) {
+      session = {
+        client: null as unknown as Client,
+        transport: null as unknown as StreamableHTTPClientTransport,
+        token: '',
+        tokenExpiresAt: 0,
+        isConnecting: true,
+      }
+      this.sessions.set(activeTenant, session)
+    } else {
+      session.isConnecting = true
+    }
+
     try {
-      if (this.transport) {
+      if (session.transport) {
         try {
-          await this.transport.close()
+          await session.transport.close()
         } catch {
           // ignore cleanup errors
         }
       }
 
-      const config = getServerConfig()
-      this.token = await mintMcpToken({ ttlSeconds: config.tokenTtlSeconds })
-      this.tokenExpiresAt = now + config.tokenTtlSeconds
+      const token = await mintMcpToken({
+        tenant: activeTenant,
+        ttlSeconds: config.tokenTtlSeconds,
+      })
+      const tokenExpiresAt = now + config.tokenTtlSeconds
 
-      this.transport = new StreamableHTTPClientTransport(new URL(config.mcpUrl), {
+      const transport = new StreamableHTTPClientTransport(new URL(config.mcpUrl), {
         requestInit: {
           headers: {
-            Authorization: `Bearer ${this.token}`,
+            Authorization: `Bearer ${token}`,
           },
         },
       })
 
       const client = new Client(
         {
-          name: 'reconcile-bff-controller',
+          name: `reconcile-bff-controller-${activeTenant}`,
           version: '1.0.0',
         },
         {
@@ -76,19 +101,25 @@ class ServerMcpService {
       )
 
       // Connect with generous timeout to handle Render cold starts
-      await client.connect(this.transport)
-      this.client = client
-      return this.client
+      await client.connect(transport)
+
+      session.client = client
+      session.transport = transport
+      session.token = token
+      session.tokenExpiresAt = tokenExpiresAt
+      return client
     } finally {
-      this.isConnecting = false
+      if (session) {
+        session.isConnecting = false
+      }
     }
   }
 
   /**
    * Discovers all capabilities supported by the upstream MCP server.
    */
-  public async getCapabilities() {
-    const client = await this.getClient()
+  public async getCapabilities(tenant?: string) {
+    const client = await this.getClient(tenant)
     const [toolsResult, resourcesResult, promptsResult] = await Promise.all([
       client.listTools().catch((e) => ({ tools: [], error: e.message })),
       client.listResources().catch((e) => ({ resources: [], error: e.message })),
@@ -104,10 +135,10 @@ class ServerMcpService {
   }
 
   /**
-   * Reads an MCP resource by URI.
+   * Reads an MCP resource by URI for the specified tenant.
    */
-  public async readResource<T = unknown>(uri: string): Promise<T> {
-    const client = await this.getClient()
+  public async readResource<T = unknown>(uri: string, tenant?: string): Promise<T> {
+    const client = await this.getClient(tenant)
     try {
       const result = await client.readResource({ uri })
       if (!result.contents || result.contents.length === 0) {
@@ -123,20 +154,21 @@ class ServerMcpService {
       }
       return item as unknown as T
     } catch (err: unknown) {
-      // If session failed, invalidate client for next attempt
-      this.invalidateClient()
+      // Invalidate tenant session for retry on next attempt
+      this.invalidateClient(tenant)
       throw err
     }
   }
 
   /**
-   * Executes an MCP tool dynamically.
+   * Executes an MCP tool dynamically for the specified tenant.
    */
   public async callTool<T = unknown>(
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    tenant?: string
   ): Promise<McpExecutionResult<T>> {
-    let client = await this.getClient()
+    const client = await this.getClient(tenant)
 
     try {
       const response = await client.callTool({
@@ -180,24 +212,38 @@ class ServerMcpService {
         raw: response,
       }
     } catch (err: unknown) {
-      // Check if connection was rejected due to stale session
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('session') || msg.includes('401') || msg.includes('Broken')) {
-        this.invalidateClient()
+        this.invalidateClient(tenant)
       }
       throw err
     }
   }
 
-  public invalidateClient() {
-    this.client = null
-    if (this.transport) {
-      try {
-        this.transport.close()
-      } catch {
-        // ignore
+  public invalidateClient(tenant?: string) {
+    if (tenant) {
+      const session = this.sessions.get(tenant)
+      if (session) {
+        if (session.transport) {
+          try {
+            session.transport.close()
+          } catch {
+            // ignore
+          }
+        }
+        this.sessions.delete(tenant)
       }
-      this.transport = null
+    } else {
+      for (const [, session] of this.sessions) {
+        if (session.transport) {
+          try {
+            session.transport.close()
+          } catch {
+            // ignore
+          }
+        }
+      }
+      this.sessions.clear()
     }
   }
 }

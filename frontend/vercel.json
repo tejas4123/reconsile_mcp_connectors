@@ -31,11 +31,19 @@
   ],
   "rewrites": [
     {
+      "source": "/mcp",
+      "destination": "/api/[...route]"
+    },
+    {
+      "source": "/mcp/(.*)",
+      "destination": "/api/[...route]"
+    },
+    {
       "source": "/api/(.*)",
       "destination": "/api/[...route]"
     },
     {
-      "source": "/((?!api/|assets/|favicon.ico).*)",
+      "source": "/((?!api/|mcp|assets/|favicon.ico).*)",
       "destination": "/index.html"
     }
   ]

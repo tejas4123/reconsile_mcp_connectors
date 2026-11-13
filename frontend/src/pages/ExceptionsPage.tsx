@@ -184,11 +184,15 @@ export const ExceptionsPage: React.FC = () => {
               onChange={(e) => handleRunChange(e.target.value)}
               className="w-full appearance-none rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-3 pr-8 text-xs font-mono font-medium text-slate-900 hover:bg-slate-100 focus:border-slate-400 focus:outline-none"
             >
-              {runs.map((r) => (
-                <option key={r.run_id} value={r.run_id}>
-                  {r.source_refs?.invoice || r.source_refs?.vendor || r.source_refs?.contract || r.run_id.substring(0, 14)} ({r.reconciliation_type} • {r.discrepancy_count} issues)
-                </option>
-              ))}
+              {runs.length === 0 ? (
+                <option value="">No reconciliation runs found</option>
+              ) : (
+                runs.map((r) => (
+                  <option key={r.run_id} value={r.run_id}>
+                    {r.source_refs?.invoice || r.source_refs?.vendor || r.source_refs?.contract || r.run_id.substring(0, 14)} ({r.reconciliation_type} • {r.discrepancy_count} issues)
+                  </option>
+                ))
+              )}
             </select>
             <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
           </div>

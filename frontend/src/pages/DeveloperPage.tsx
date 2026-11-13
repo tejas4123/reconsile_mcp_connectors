@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react'
+import React, { useState, useMemo, useRef } from 'react'
 import {
   Radio,
   Layers,
@@ -23,8 +23,8 @@ import {
   ShieldAlert,
   Server,
 } from 'lucide-react'
-import { useAuth } from '../lib/auth/use-auth.ts'
 import { useApi } from '../api/context.tsx'
+import { apiClient } from '../lib/api/api-client.ts'
 import { McpClient, McpError } from '../lib/mcp/mcp-client.ts'
 import type {
   McpConnectionState,
@@ -43,11 +43,10 @@ import { DynamicSchemaForm } from '../components/mcp/DynamicSchemaForm.tsx'
 import { JsonViewer } from '../components/common/JsonViewer.tsx'
 
 export const DeveloperPage: React.FC = () => {
-  const { token: authSessionToken } = useAuth()
   const { backendUrl, addToast } = useApi()
 
   // Connection settings
-  const [serverUrl, setServerUrl] = useState<string>('/api/mcp')
+  const [serverUrl, setServerUrl] = useState<string>('/mcp')
   const [token, setToken] = useState<string>('')
   const [showToken, setShowToken] = useState<boolean>(false)
   const [connectionState, setConnectionState] = useState<McpConnectionState>('disconnected')
@@ -101,34 +100,150 @@ export const DeveloperPage: React.FC = () => {
   const [copiedSnippet, setCopiedSnippet] = useState<string | null>(null)
 
   // Singleton McpClient ref
-  const clientRef = useRef<McpClient>(new McpClient({ serverUrl: `${backendUrl}/mcp` }))
+  const clientRef = useRef<McpClient>(new McpClient({ serverUrl: '/mcp' }))
+  const activeConnectionIdRef = useRef<string | null>(null)
 
-  // Synchronize backendUrl changes
-  useEffect(() => {
-    if (connectionState === 'disconnected') {
-      setServerUrl(`${backendUrl}/mcp`)
-    }
-  }, [backendUrl, connectionState])
+  const mapHistoryItems = (
+    items: Array<{
+      id: string
+      operation: string
+      target: string
+      params?: Record<string, unknown>
+      status: string
+      latency_ms: number
+      result_summary?: string | null
+      error?: string | null
+      timestamp: string
+    }>
+  ): McpExecutionHistoryItem[] => {
+    return items.map((h) => ({
+      id: h.id,
+      toolName: h.target,
+      timestamp: new Date(h.timestamp),
+      durationMs: Math.round(h.latency_ms),
+      status: h.status === 'success' ? 'success' : 'error',
+      arguments: h.params || {},
+      error: h.error || undefined,
+      rawRequest: {
+        jsonrpc: '2.0',
+        id: h.id,
+        method: h.operation,
+        params: h.params,
+      },
+      rawResponse: {
+        jsonrpc: '2.0',
+        id: h.id,
+        result: h.result_summary,
+      },
+    }))
+  }
 
-  // Pre-fill token from active session if available
-  useEffect(() => {
-    if (authSessionToken && !token) {
-      setToken(authSessionToken)
+  // Refresh dynamic discovery from backend
+  const refreshCapabilitiesFromBackend = async (connectionId: string) => {
+    try {
+      const [fetchedTools, fetchedResources, fetchedPrompts, history] = await Promise.all([
+        apiClient.listMcpTools(connectionId).catch(() => []),
+        apiClient.listMcpResources(connectionId).catch(() => []),
+        apiClient.listMcpPrompts(connectionId).catch(() => []),
+        apiClient.getMcpHistory(connectionId).catch(() => []),
+      ])
+
+      const mappedTools: McpTool[] = fetchedTools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: (t.inputSchema as unknown as McpTool['inputSchema']) || { type: 'object' },
+      }))
+
+      const mappedResources: McpResource[] = fetchedResources.map((r) => ({
+        uri: r.uri,
+        name: r.name || r.uri,
+        description: r.description,
+        mimeType: r.mimeType,
+      }))
+
+      const mappedPrompts: McpPrompt[] = fetchedPrompts.map((p) => ({
+        name: p.name,
+        description: p.description,
+        arguments: p.arguments,
+      }))
+
+      setTools(mappedTools)
+      setResources(mappedResources)
+      setPrompts(mappedPrompts)
+
+      if (history && history.length > 0) {
+        setHistoryItems(mapHistoryItems(history))
+      }
+
+      if (mappedTools.length > 0 && (!selectedTool || !mappedTools.some((t) => t.name === selectedTool.name))) {
+        setSelectedTool(mappedTools[0])
+      }
+      if (mappedPrompts.length > 0 && !selectedPrompt) {
+        setSelectedPrompt(mappedPrompts[0])
+      }
+      if (mappedResources.length > 0 && !customResourceUri) {
+        setCustomResourceUri(mappedResources[0].uri)
+      }
+    } catch (err) {
+      console.error('Error refreshing backend capabilities:', err)
     }
-  }, [authSessionToken, token])
+  }
 
   // Connect handler
-  const handleConnect = async () => {
+  const handleConnect = async (targetUrl?: string | React.MouseEvent) => {
+    const urlToUse = (typeof targetUrl === 'string' ? targetUrl : serverUrl).trim()
+    if (typeof targetUrl === 'string') {
+      setServerUrl(targetUrl)
+    }
     setIsConnecting(true)
     setConnectionError(null)
 
     try {
+      // 1. Primary path: Connect through real backend MCP Client Manager
+      try {
+        const conn = await apiClient.createMcpConnection({
+          url: urlToUse,
+          bearer_token: token.trim() || undefined,
+          connect_now: true,
+        })
+
+        activeConnectionIdRef.current = conn.connection_id
+        setConnectionState('connected')
+        setServerInfo(
+          (conn.server_info as McpInitializeResult['serverInfo']) || {
+            name: 'reconcile-mcp',
+            version: '0.1.0',
+          }
+        )
+        setProtocolVersion(conn.protocol_version || '2025-11-25')
+        setInstructions(conn.instructions || null)
+        setSessionId(conn.connection_id)
+
+        addToast(
+          'MCP Connected',
+          `Established real MCP session with ${conn.server_info?.name || 'reconcile-mcp'} (${conn.tools_count} tools, ${conn.resources_count} resources)`,
+          'success'
+        )
+
+        await refreshCapabilitiesFromBackend(conn.connection_id)
+        return
+      } catch (backendErr: unknown) {
+        const backendMsg = backendErr instanceof Error ? backendErr.message : String(backendErr)
+        // If the backend endpoint failed with a connection error to the target MCP server, report it directly
+        if (backendMsg.includes('connection to MCP server failed') || backendMsg.includes('502') || backendMsg.includes('SSRF') || backendMsg.includes('Forbidden')) {
+          throw backendErr
+        }
+        console.warn('Backend MCP endpoint unreachable, trying client fallback:', backendErr)
+      }
+
+      // 2. Direct browser McpClient fallback
       const client = clientRef.current
       const initResult = await client.connect({
-        serverUrl: serverUrl.trim(),
+        serverUrl: urlToUse,
         token: token.trim() || undefined,
       })
 
+      activeConnectionIdRef.current = null
       setConnectionState('connected')
       setServerInfo(initResult.serverInfo)
       setProtocolVersion(initResult.protocolVersion)
@@ -136,8 +251,6 @@ export const DeveloperPage: React.FC = () => {
       setSessionId(client.getSessionId())
 
       addToast('MCP Connected', `Established connection with ${initResult.serverInfo.name} v${initResult.serverInfo.version}`, 'success')
-
-      // Discover capabilities dynamically
       await refreshCapabilities(client)
     } catch (err: unknown) {
       setConnectionState('error')
@@ -153,7 +266,15 @@ export const DeveloperPage: React.FC = () => {
   }
 
   // Disconnect handler
-  const handleDisconnect = () => {
+  const handleDisconnect = async () => {
+    if (activeConnectionIdRef.current) {
+      try {
+        await apiClient.disconnectMcpConnection(activeConnectionIdRef.current)
+      } catch (e) {
+        console.warn('Error disconnecting backend session:', e)
+      }
+      activeConnectionIdRef.current = null
+    }
     clientRef.current.disconnect()
     setConnectionState('disconnected')
     setServerInfo(null)
@@ -171,6 +292,11 @@ export const DeveloperPage: React.FC = () => {
 
   // Refresh dynamic discovery
   const refreshCapabilities = async (clientInstance?: McpClient) => {
+    if (activeConnectionIdRef.current) {
+      await refreshCapabilitiesFromBackend(activeConnectionIdRef.current)
+      return
+    }
+
     const client = clientInstance || clientRef.current
     try {
       const [fetchedTools, fetchedResources, fetchedPrompts] = await Promise.all([
@@ -214,6 +340,45 @@ export const DeveloperPage: React.FC = () => {
     setToolExecutionError(null)
     setLastExecutionResult(null)
 
+    // Primary: Backend execution
+    if (activeConnectionIdRef.current) {
+      try {
+        const res = await apiClient.callMcpTool(activeConnectionIdRef.current, selectedTool.name, args)
+        const callResult: McpToolCallResult = {
+          content: (res.content as unknown as McpToolCallResult['content']) || [],
+          structured_content: res.structured_content as Record<string, unknown> | undefined,
+          isError: res.is_error,
+        }
+
+        setLastExecutionResult({
+          result: callResult,
+          durationMs: Math.round(res.latency_ms),
+          rawRequest: { jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name: selectedTool.name, arguments: args } },
+          rawResponse: { jsonrpc: '2.0', id: Date.now(), result: res },
+        })
+
+        const hist = await apiClient.getMcpHistory(activeConnectionIdRef.current).catch(() => [])
+        if (hist.length > 0) {
+          setHistoryItems(mapHistoryItems(hist))
+        }
+
+        if (res.is_error) {
+          setToolExecutionError('Tool executed but reported an application error.')
+          addToast('Tool Execution Warning', `Execution reported an error`, 'warning')
+        } else {
+          addToast('Tool Executed', `Finished in ${Math.round(res.latency_ms)}ms`, 'success')
+        }
+        return
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        setToolExecutionError(msg)
+        addToast('Tool Execution Failed', msg, 'error')
+        return
+      } finally {
+        setIsExecutingTool(false)
+      }
+    }
+
     try {
       const response = await clientRef.current.callTool(selectedTool.name, args)
       setLastExecutionResult(response)
@@ -241,6 +406,27 @@ export const DeveloperPage: React.FC = () => {
     setResourceError(null)
     setResourceContent(null)
 
+    if (activeConnectionIdRef.current) {
+      try {
+        const result = await apiClient.readMcpResource(activeConnectionIdRef.current, uri)
+        setResourceContent(result.contents as McpResourceContent[])
+        addToast('Resource Retrieved', `Loaded ${result.contents.length} content item(s)`, 'success')
+
+        const hist = await apiClient.getMcpHistory(activeConnectionIdRef.current).catch(() => [])
+        if (hist.length > 0) {
+          setHistoryItems(mapHistoryItems(hist))
+        }
+        return
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        setResourceError(msg)
+        addToast('Resource Read Failed', msg, 'error')
+        return
+      } finally {
+        setIsReadingResource(false)
+      }
+    }
+
     try {
       const result = await clientRef.current.readResource(uri)
       setResourceContent(result.contents)
@@ -261,6 +447,30 @@ export const DeveloperPage: React.FC = () => {
     setIsFetchingPrompt(true)
     setPromptError(null)
     setPromptResult(null)
+
+    if (activeConnectionIdRef.current) {
+      try {
+        const result = await apiClient.getMcpPrompt(activeConnectionIdRef.current, selectedPrompt.name, promptArgs)
+        setPromptResult({
+          description: result.description || undefined,
+          messages: result.messages as McpPromptGetResult['messages'],
+        })
+        addToast('Prompt Retrieved', `Fetched ${result.messages.length} message template(s)`, 'success')
+
+        const hist = await apiClient.getMcpHistory(activeConnectionIdRef.current).catch(() => [])
+        if (hist.length > 0) {
+          setHistoryItems(mapHistoryItems(hist))
+        }
+        return
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        setPromptError(msg)
+        addToast('Prompt Fetch Failed', msg, 'error')
+        return
+      } finally {
+        setIsFetchingPrompt(false)
+      }
+    }
 
     try {
       const result = await clientRef.current.getPrompt(selectedPrompt.name, promptArgs)
@@ -366,18 +576,18 @@ export const DeveloperPage: React.FC = () => {
               <div className="flex items-center gap-1.5 font-mono text-[10px]">
                 <button
                   type="button"
-                  onClick={() => setQuickUrl(`${backendUrl}/mcp`)}
-                  className="text-sky-600 hover:underline"
+                  onClick={() => setQuickUrl('/mcp')}
+                  className={`hover:underline ${serverUrl === '/mcp' ? 'font-bold text-emerald-700' : 'text-sky-600'}`}
                 >
-                  Direct ({backendUrl}/mcp)
+                  Local (/mcp)
                 </button>
                 <span className="text-slate-300">|</span>
                 <button
                   type="button"
-                  onClick={() => setQuickUrl('/mcp')}
-                  className="text-sky-600 hover:underline"
+                  onClick={() => setQuickUrl('https://reconcile-mcp.onrender.com/mcp')}
+                  className={`hover:underline ${serverUrl.includes('onrender.com') ? 'font-bold text-emerald-700' : 'text-sky-600'}`}
                 >
-                  Proxy (/mcp)
+                  Render Production
                 </button>
               </div>
             </div>
@@ -396,17 +606,15 @@ export const DeveloperPage: React.FC = () => {
             <div className="flex items-center justify-between text-xs">
               <label className="font-semibold text-slate-700 flex items-center gap-1">
                 <Key className="h-3.5 w-3.5 text-slate-400" /> Bearer Token
+                <span className="text-[10px] text-slate-400 font-normal">(Optional for /mcp)</span>
               </label>
-              {authSessionToken && (
+              {token && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setToken(authSessionToken)
-                    addToast('Token Injected', 'Active user session token copied to MCP config', 'info')
-                  }}
-                  className="text-[10px] text-sky-600 hover:underline font-mono"
+                  onClick={() => setToken('')}
+                  className="text-[10px] text-rose-600 hover:underline font-mono"
                 >
-                  Use Session Token
+                  Clear Token
                 </button>
               )}
             </div>
@@ -416,16 +624,18 @@ export const DeveloperPage: React.FC = () => {
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
                 disabled={connectionState === 'connected'}
-                placeholder="JWT Bearer Token..."
+                placeholder="Optional (Proxy authenticates automatically)..."
                 className="w-full px-3 py-1.5 pr-14 bg-slate-50 border border-slate-200 rounded text-xs font-mono text-slate-900 focus:bg-white focus:outline-none focus:ring-1 focus:ring-slate-900 disabled:opacity-60"
               />
-              <button
-                type="button"
-                onClick={() => setShowToken(!showToken)}
-                className="absolute right-2 top-1.5 text-[10px] text-slate-400 hover:text-slate-700 font-mono"
-              >
-                {showToken ? 'Hide' : 'Show'}
-              </button>
+              {token && (
+                <button
+                  type="button"
+                  onClick={() => setShowToken(!showToken)}
+                  className="absolute right-2 top-1.5 text-[10px] text-slate-400 hover:text-slate-700 font-mono"
+                >
+                  {showToken ? 'Hide' : 'Show'}
+                </button>
+              )}
             </div>
           </div>
 
@@ -475,15 +685,33 @@ export const DeveloperPage: React.FC = () => {
 
         {/* Error Callout */}
         {connectionError && (
-          <div className="rounded-lg bg-rose-50 border border-rose-200 p-3 text-xs text-rose-800 flex items-start gap-2.5">
-            <AlertCircle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <p className="font-bold">Connection Failure</p>
-              <p className="text-[11px] font-mono leading-relaxed">{connectionError}</p>
+          <div className="rounded-lg bg-rose-50 border border-rose-200 p-4 text-xs text-rose-800 flex items-start gap-3">
+            <AlertCircle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
+            <div className="space-y-2 flex-1">
+              <div>
+                <p className="font-bold text-sm text-rose-900">Connection Failure</p>
+                <p className="text-xs font-mono leading-relaxed mt-1 text-rose-800">{connectionError}</p>
+              </div>
+
+              {serverUrl !== '/mcp' && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleConnect('/mcp')}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-900 hover:bg-rose-950 text-white rounded text-xs font-bold transition-all shadow-xs cursor-pointer"
+                  >
+                    <span>Switch to Integrated Proxy (/mcp) & Connect Now</span>
+                  </button>
+                  <p className="text-[11px] text-rose-700 mt-1">
+                    Direct browser requests to remote servers are blocked by browser CORS policies. The integrated BFF proxy at <code className="font-mono bg-rose-100 px-1 py-0.5 rounded">/mcp</code> terminates CORS and authenticates securely on the server.
+                  </p>
+                </div>
+              )}
+
               <div className="pt-1 flex items-center gap-2">
                 <button
                   onClick={() => setActiveTab('architecture')}
-                  className="underline text-[11px] font-medium hover:text-rose-950"
+                  className="underline text-[11px] font-medium text-rose-700 hover:text-rose-950 cursor-pointer"
                 >
                   View MCP Connection Gateway Documentation & Solutions →
                 </button>

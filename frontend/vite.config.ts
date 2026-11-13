@@ -5,7 +5,7 @@ import { handleNodeApiRequest } from './server/handlers.ts'
 
 function bffDevPlugin(): Plugin {
   const middleware = (req: any, res: any, next: any) => {
-    if (req.url && req.url.startsWith('/api')) {
+    if (req.url && (req.url.startsWith('/api') || req.url === '/mcp' || req.url.startsWith('/mcp?') || req.url.startsWith('/mcp/'))) {
       handleNodeApiRequest(req, res).catch((err) => {
         console.error('BFF Middleware Error:', err)
         next(err)

@@ -35,7 +35,7 @@ export const SettingsPage: React.FC = () => {
   >('workspace')
 
   const [apiUrl, setApiUrl] = useState(backendUrl)
-  const [jwtToken, setJwtToken] = useState(token || '')
+  const [jwtToken, setJwtToken] = useState('')
   const [copiedCli, setCopiedCli] = useState(false)
   const [testingConnection, setTestingConnection] = useState(false)
 
@@ -232,7 +232,10 @@ export const SettingsPage: React.FC = () => {
               <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/60 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-900">ERP / Neon Postgres</span>
-                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  <span
+                    className={`h-2 w-2 rounded-full ${isBackendLive ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                    title={isBackendLive ? 'Online & Reachable' : 'Offline'}
+                  />
                 </div>
                 <p className="text-slate-500 text-[11px]">
                   Stores Purchase Orders, General Ledger accounts, and payment schedules.
@@ -242,7 +245,10 @@ export const SettingsPage: React.FC = () => {
               <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/60 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-900">Invoicing Service</span>
-                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  <span
+                    className={`h-2 w-2 rounded-full ${isBackendLive ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                    title={isBackendLive ? 'Online & Reachable' : 'Offline'}
+                  />
                 </div>
                 <p className="text-slate-500 text-[11px]">
                   Supplier invoices, OCR line item records, and tax filings.
@@ -252,7 +258,10 @@ export const SettingsPage: React.FC = () => {
               <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/60 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-900">CRM & Contracts</span>
-                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  <span
+                    className={`h-2 w-2 rounded-full ${isBackendLive ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                    title={isBackendLive ? 'Online & Reachable' : 'Offline'}
+                  />
                 </div>
                 <p className="text-slate-500 text-[11px]">
                   Master service agreements, deal contracts, and customer obligations.
@@ -440,10 +449,23 @@ export const SettingsPage: React.FC = () => {
                 />
                 <button
                   type="submit"
-                  className="rounded-lg bg-slate-900 px-3 py-1.5 font-semibold text-white hover:bg-slate-800 transition-colors"
+                  className="rounded-lg bg-slate-900 px-3 py-1.5 font-semibold text-white hover:bg-slate-800 transition-colors cursor-pointer"
                 >
                   Set Token
                 </button>
+                {token && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      logout('User cleared token')
+                      setJwtToken('')
+                      addToast('Token Cleared', 'Active bearer token removed', 'info')
+                    }}
+                    className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 font-semibold text-rose-700 hover:bg-rose-100 transition-colors cursor-pointer"
+                  >
+                    Clear Token
+                  </button>
+                )}
               </div>
             </form>
 

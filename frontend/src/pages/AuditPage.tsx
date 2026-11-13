@@ -30,16 +30,28 @@ interface EventMeta {
 }
 
 function getEventMeta(eventType: string): EventMeta {
-  switch (eventType) {
-    case 'RECONCILIATION_RUN_STARTED':
+  const norm = eventType.toLowerCase().replace(/_/g, '.')
+  switch (norm) {
+    case 'run.requested':
+    case 'reconciliation.run.requested':
       return {
-        title: 'Reconciliation Initiated',
+        title: 'Reconciliation Requested',
         description: (evt) =>
-          `Automated pipeline started for target record ${evt.subject_id || 'batch'}.`,
+          `Reconciliation requested by ${evt.actor || 'operator'} for target ${evt.subject_id?.slice(0, 8) || 'run'}.`,
         icon: PlayCircle,
         color: 'text-sky-600 bg-sky-50 border-sky-200',
       }
-    case 'RECONCILIATION_RUN_COMPLETED':
+    case 'run.started':
+    case 'reconciliation.run.started':
+      return {
+        title: 'Reconciliation Initiated',
+        description: () =>
+          `Automated pipeline started comparing records across systems.`,
+        icon: PlayCircle,
+        color: 'text-sky-600 bg-sky-50 border-sky-200',
+      }
+    case 'run.completed':
+    case 'reconciliation.run.completed':
       return {
         title: 'Reconciliation Completed',
         description: (evt) =>
@@ -47,7 +59,15 @@ function getEventMeta(eventType: string): EventMeta {
         icon: CheckCircle2,
         color: 'text-emerald-600 bg-emerald-50 border-emerald-200',
       }
-    case 'DISCREPANCY_DETECTED':
+    case 'run.status.changed':
+      return {
+        title: 'Run Status Updated',
+        description: (evt) =>
+          `Status transitioned from ${evt.payload?.from || '—'} to ${evt.payload?.to || '—'}.`,
+        icon: History,
+        color: 'text-slate-600 bg-slate-50 border-slate-200',
+      }
+    case 'discrepancy.detected':
       return {
         title: 'Discrepancy Identified',
         description: (evt) =>
@@ -55,7 +75,7 @@ function getEventMeta(eventType: string): EventMeta {
         icon: AlertOctagon,
         color: 'text-amber-600 bg-amber-50 border-amber-200',
       }
-    case 'PROPOSAL_CREATED':
+    case 'proposal.created':
       return {
         title: 'Resolution Proposed',
         description: (evt) =>
@@ -63,7 +83,23 @@ function getEventMeta(eventType: string): EventMeta {
         icon: FileCheck2,
         color: 'text-indigo-600 bg-indigo-50 border-indigo-200',
       }
-    case 'PROPOSAL_DECIDED':
+    case 'proposal.approved':
+      return {
+        title: 'Resolution Approved (Human Authorization)',
+        description: (evt) =>
+          `Controller ${evt.payload?.approver || evt.actor || ''} authorized action "${evt.payload?.action || ''}".`,
+        icon: ShieldCheck,
+        color: 'text-purple-600 bg-purple-50 border-purple-200',
+      }
+    case 'proposal.rejected':
+      return {
+        title: 'Resolution Rejected',
+        description: (evt) =>
+          `Controller rejected proposal: ${evt.payload?.comment || 'Rejected during review'}.`,
+        icon: AlertOctagon,
+        color: 'text-rose-600 bg-rose-50 border-rose-200',
+      }
+    case 'proposal.decided':
       return {
         title: 'Human Authorization Decided',
         description: (evt) =>
@@ -71,9 +107,10 @@ function getEventMeta(eventType: string): EventMeta {
         icon: ShieldCheck,
         color: 'text-purple-600 bg-purple-50 border-purple-200',
       }
-    case 'RESOLUTION_APPLIED':
+    case 'proposal.applied':
+    case 'resolution.applied':
       return {
-        title: 'Resolution Applied to ERP',
+        title: 'Resolution Applied to Target System',
         description: () =>
           `Approved correction successfully written to ERP financial database.`,
         icon: CheckCircle2,
@@ -81,7 +118,7 @@ function getEventMeta(eventType: string): EventMeta {
       }
     default:
       return {
-        title: eventType.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+        title: eventType.replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
         description: (evt) =>
           `Audit record registered for entity ${evt.subject_id || evt.subject_type}.`,
         icon: History,
@@ -220,11 +257,15 @@ export const AuditPage: React.FC = () => {
               onChange={(e) => handleRunChange(e.target.value)}
               className="w-full appearance-none rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-3 pr-8 text-xs font-mono font-medium text-slate-900 hover:bg-slate-100 focus:border-slate-400 focus:outline-none"
             >
-              {runs.map((r) => (
-                <option key={r.run_id} value={r.run_id}>
-                  {r.source_refs?.invoice || r.source_refs?.vendor || r.source_refs?.contract || r.run_id.substring(0, 14)} ({r.reconciliation_type})
-                </option>
-              ))}
+              {runs.length === 0 ? (
+                <option value="">No reconciliation runs found</option>
+              ) : (
+                runs.map((r) => (
+                  <option key={r.run_id} value={r.run_id}>
+                    {r.source_refs?.invoice || r.source_refs?.vendor || r.source_refs?.contract || r.run_id.substring(0, 14)} ({r.reconciliation_type})
+                  </option>
+                ))
+              )}
             </select>
             <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
           </div>
