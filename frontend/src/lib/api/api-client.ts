@@ -32,6 +32,19 @@ import type {
   McpResourceReadResultView,
   McpPromptGetResultView,
   McpExecutionRecordView,
+  ColumnMetadata,
+  ConnectionTestRequest,
+  ConnectionTestResult,
+  ConnectorConnectionView,
+  CreateConnectorRequest,
+  EntityMappingConfig,
+  MappingValidationResult,
+  ProviderInfo,
+  SamplePreviewRequest,
+  SamplePreviewResponse,
+  TableMetadata,
+  TargetSchemaDefinition,
+  UpdateConnectorRequest,
 } from './api-types.ts'
 import { ApiError, NetworkError, parseHttpError } from './api-errors.ts'
 import { authClient } from '../auth/auth-client.ts'
@@ -635,6 +648,119 @@ export class ReconcileApiClient {
 
   async getMcpHistory(connectionId: string, limit = 50): Promise<McpExecutionRecordView[]> {
     return this.request<McpExecutionRecordView[]>(`/api/v1/mcp/connections/${connectionId}/history?limit=${limit}`)
+  }
+
+  // ------------------------------------------------------------------
+  // Data Connector Manager API
+  // ------------------------------------------------------------------
+
+  async listConnectorProviders(): Promise<ProviderInfo[]> {
+    return this.request<ProviderInfo[]>('/api/v1/connectors/providers')
+  }
+
+  async listTargetSchemas(): Promise<TargetSchemaDefinition[]> {
+    return this.request<TargetSchemaDefinition[]>('/api/v1/connectors/target-schemas')
+  }
+
+  async testUnpersistedConnection(req: ConnectionTestRequest): Promise<ConnectionTestResult> {
+    return this.request<ConnectionTestResult>('/api/v1/connectors/test', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    })
+  }
+
+  async createConnectorConnection(req: CreateConnectorRequest): Promise<ConnectorConnectionView> {
+    return this.request<ConnectorConnectionView>('/api/v1/connectors', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    })
+  }
+
+  async listConnectorConnections(): Promise<ConnectorConnectionView[]> {
+    return this.request<ConnectorConnectionView[]>('/api/v1/connectors')
+  }
+
+  async getConnectorConnection(connectionId: string): Promise<ConnectorConnectionView> {
+    return this.request<ConnectorConnectionView>(`/api/v1/connectors/${connectionId}`)
+  }
+
+  async updateConnectorConnection(
+    connectionId: string,
+    req: UpdateConnectorRequest
+  ): Promise<ConnectorConnectionView> {
+    return this.request<ConnectorConnectionView>(`/api/v1/connectors/${connectionId}`, {
+      method: 'PUT',
+      body: JSON.stringify(req),
+    })
+  }
+
+  async deleteConnectorConnection(connectionId: string): Promise<void> {
+    await this.request<void>(`/api/v1/connectors/${connectionId}`, {
+      method: 'DELETE',
+    })
+  }
+
+  async testSavedConnection(connectionId: string): Promise<ConnectionTestResult> {
+    return this.request<ConnectionTestResult>(`/api/v1/connectors/${connectionId}/test`, {
+      method: 'POST',
+    })
+  }
+
+  async discoverSchemas(connectionId: string): Promise<string[]> {
+    return this.request<string[]>(`/api/v1/connectors/${connectionId}/schemas`)
+  }
+
+  async discoverTables(connectionId: string, schema: string): Promise<TableMetadata[]> {
+    return this.request<TableMetadata[]>(
+      `/api/v1/connectors/${connectionId}/schemas/${encodeURIComponent(schema)}/tables`
+    )
+  }
+
+  async discoverColumns(
+    connectionId: string,
+    schema: string,
+    table: string
+  ): Promise<ColumnMetadata[]> {
+    return this.request<ColumnMetadata[]>(
+      `/api/v1/connectors/${connectionId}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/columns`
+    )
+  }
+
+  async previewSample(
+    connectionId: string,
+    req: SamplePreviewRequest
+  ): Promise<SamplePreviewResponse> {
+    return this.request<SamplePreviewResponse>(`/api/v1/connectors/${connectionId}/preview`, {
+      method: 'POST',
+      body: JSON.stringify(req),
+    })
+  }
+
+  async getMappings(connectionId: string): Promise<EntityMappingConfig[]> {
+    return this.request<EntityMappingConfig[]>(`/api/v1/connectors/${connectionId}/mappings`)
+  }
+
+  async saveMappings(
+    connectionId: string,
+    mappings: EntityMappingConfig[]
+  ): Promise<EntityMappingConfig[]> {
+    return this.request<EntityMappingConfig[]>(`/api/v1/connectors/${connectionId}/mappings`, {
+      method: 'PUT',
+      body: JSON.stringify(mappings),
+    })
+  }
+
+  async validateMapping(
+    connectionId: string,
+    mapping: EntityMappingConfig
+  ): Promise<MappingValidationResult> {
+    return this.request<MappingValidationResult>(
+      `/api/v1/connectors/${connectionId}/mappings/validate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(mapping),
+      }
+    )
   }
 }
 

@@ -793,6 +793,36 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       }
     }
 
+    // 18c. Real Data Connectors API (/api/v1/connectors/*)
+    if (pathname.startsWith('/api/v1/connectors')) {
+      const adminToken = await mintMcpToken({
+        tenant,
+        scopes: 'recon:read recon:run recon:admin',
+        subject: 'admin@reconcile.local',
+        clientId: 'admin-console',
+      })
+      const upstreamUrl = `${config.restBaseUrl}${pathname}${url.search}`
+      const reqHeaders: Record<string, string> = {
+        Authorization: request.headers.get('Authorization') || `Bearer ${adminToken}`,
+        'Content-Type': 'application/json',
+      }
+      try {
+        const upstreamRes = await fetch(upstreamUrl, {
+          method,
+          headers: reqHeaders,
+          body: ['GET', 'HEAD', 'DELETE'].includes(method) ? undefined : await request.text(),
+        })
+        if (upstreamRes.status === 204) {
+          return new Response(null, { status: 204 })
+        }
+        const data = await upstreamRes.json().catch(() => ({}))
+        return jsonResponse(data, upstreamRes.status)
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        return jsonResponse({ code: 'CONNECTOR_GATEWAY_ERROR', message: errMsg }, 502)
+      }
+    }
+
     // 19. Generic MCP Tool Call (for Developer Playground)
     if (pathname === '/api/mcp/call' && method === 'POST') {
       const body = (await request.json()) as {

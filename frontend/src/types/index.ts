@@ -511,3 +511,165 @@ export interface McpExecutionRecordView {
   timestamp: string
 }
 
+
+// =====================================================================
+// Data Connector Manager Models
+// =====================================================================
+
+export interface ProviderInfo {
+  id: string
+  name: string
+  category: 'relational_database' | 'cloud_database' | 'enterprise_erp' | 'object_storage'
+  status: 'supported' | 'planned' | 'beta'
+  default_port?: number | null
+  description: string
+  driver?: string | null
+  icon: string
+}
+
+export interface ConnectionTestRequest {
+  provider?: string
+  host: string
+  port?: number
+  database: string
+  schema?: string
+  username: string
+  password?: string
+  secret_ref?: string
+  ssl_mode?: string
+  connection_timeout?: number
+}
+
+export interface ConnectionTestResult {
+  success: boolean
+  latency_ms: number
+  server_version?: string | null
+  current_user?: string | null
+  current_database?: string | null
+  schemas: string[]
+  error_code?: string | null
+  error_message?: string | null
+  diagnostic?: string | null
+}
+
+export interface CreateConnectorRequest {
+  name: string
+  provider?: string
+  host: string
+  port?: number
+  database: string
+  schema?: string
+  username: string
+  password?: string
+  secret_ref?: string
+  ssl_mode?: string
+  connection_timeout?: number
+}
+
+export interface UpdateConnectorRequest {
+  name?: string
+  host?: string
+  port?: number
+  database?: string
+  schema?: string
+  username?: string
+  password?: string
+  secret_ref?: string
+  ssl_mode?: string
+  connection_timeout?: number
+}
+
+export interface ColumnMetadata {
+  name: string
+  data_type: string
+  nullable: boolean
+  primary_key: boolean
+  default?: string | null
+}
+
+export interface TableMetadata {
+  schema: string
+  name: string
+  type: 'table' | 'view'
+  estimated_row_count?: number | null
+  primary_keys: string[]
+  columns: ColumnMetadata[]
+}
+
+export interface FieldMappingItem {
+  target_field: string
+  source_column: string
+  required: boolean
+  expected_type: string
+}
+
+export interface EntityMappingConfig {
+  entity_type: string
+  source_schema: string
+  source_table: string
+  id_column: string
+  tenant_column?: string | null
+  version_column?: string | null
+  field_mappings: FieldMappingItem[]
+}
+
+export interface MappingValidationResult {
+  valid: boolean
+  entity_type: string
+  errors: string[]
+  warnings: string[]
+  missing_required_fields: string[]
+  unmapped_columns: string[]
+}
+
+export interface SamplePreviewRequest {
+  schema?: string
+  table: string
+  limit?: number
+  entity_type?: string
+}
+
+export interface SamplePreviewResponse {
+  schema: string
+  table: string
+  row_count: number
+  columns: string[]
+  rows: Array<Record<string, unknown>>
+  mapped_records?: Array<Record<string, unknown>> | null
+}
+
+export interface ConnectorConnectionView {
+  id: string
+  tenant_id: string
+  name: string
+  provider: string
+  kind: string
+  host: string
+  port: number
+  database: string
+  schema: string
+  username: string
+  has_credential: boolean
+  secret_ref?: string | null
+  ssl_mode: string
+  connection_timeout: number
+  status: 'connected' | 'unverified' | 'error' | string
+  last_tested_at?: string | null
+  last_error?: string | null
+  mapped_entities: string[]
+  created_at: string
+}
+
+export interface TargetFieldDefinition {
+  name: string
+  type: string
+  required: boolean
+  description: string
+}
+
+export interface TargetSchemaDefinition {
+  entity_type: string
+  display_name: string
+  description: string
+  fields: TargetFieldDefinition[]
+}
